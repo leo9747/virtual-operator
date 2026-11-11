@@ -1,0 +1,27 @@
+# Private runtime data and credentials
+.env
+.env.*
+data/
+
+# Generated application and QA artifacts
+frontend/dist/
+qa/output/
+*.log
+
+# Local environments and caches
+.venv/
+frontend/node_modules/
+__pycache__/
+.pytest_cache/
+*.py[cod]
+.DS_Store
+
+# Additional credential locations and transient private work
+*.key
+*.pem
+.envrc
+.ssh/
+.gnupg/
+.work/
+google_client_secret.json
+google_token.json
