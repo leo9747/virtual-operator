@@ -107,7 +107,7 @@ export function ComposeView({ onCreated }: { onCreated: () => void }) {
                 <div className="creation-result">
                   <div><strong>{mode === 'agent' ? 'Agent proposal returned' : 'Draft created for review'}</strong><p>No external message or native document was sent or published.</p></div>
                   {Object.entries(result).filter(([key, value]) => ['id', 'draft_id', 'status', 'version'].includes(key) && (typeof value === 'string' || typeof value === 'number')).map(([key, value]) => <span className="result-meta" key={key}>{key.replace('_', ' ')}: {String(value)}</span>)}
-                  <div className="result-actions"><button className="button button-primary button-small" onClick={onCreated} type="button">Open Review <Icon name="arrow" size={15} /></button><button className="button button-quiet button-small" onClick={reset} type="button">Create another</button></div>
+                  <div className="result-actions"><button className="button button-primary button-small" onClick={onCreated} type="button">Open inbox <Icon name="arrow" size={15} /></button><button className="button button-quiet button-small" onClick={reset} type="button">Create another</button></div>
                 </div>
               </Notice>
             )}
@@ -147,7 +147,7 @@ export function ComposeView({ onCreated }: { onCreated: () => void }) {
               </div>
             )}
           </section>
-          <div className="compose-submit"><div><strong>{mode === 'agent' ? 'Request a proposal' : 'Add to the review queue'}</strong><span>This action does not send, publish, or modify an external service.</span></div><button className="button button-primary" disabled={busy || !!result} type="submit">{busy ? 'Submitting…' : mode === 'agent' ? 'Generate with agent' : 'Create draft'}<Icon name="arrow" /></button></div>
+          <div className="compose-submit"><div><strong>{mode === 'agent' ? 'Request a proposal' : 'Add to the inbox'}</strong><span>This action does not send, publish, or modify an external service.</span></div><button className="button button-primary" disabled={busy || !!result} type="submit">{busy ? 'Submitting…' : mode === 'agent' ? 'Generate with agent' : 'Create draft'}<Icon name="arrow" /></button></div>
         </form>
         <aside className="compose-summary" aria-label="Draft summary">
           <p className="eyebrow">Current brief</p><h2>{values.title || 'Untitled draft'}</h2>

@@ -1,6 +1,12 @@
-"""Strictly read-only access to the locally persisted operator-draft index."""
+"""Strictly read-only access to the locally persisted operator-draft index.
+
+Nothing in this module writes under VO_REVIEW_DIR. Edited copies of indexed Markdown
+documents are stored as versions in the application database (see Store).
+"""
 from collections import Counter
 import csv
+from datetime import datetime, timezone
+import hashlib
 import io
 import os
 from pathlib import Path
@@ -18,8 +24,13 @@ class SavedDraftsError(RuntimeError):
     """The configured private review folder cannot be exposed safely."""
 
 
+class DocumentNotEditable(SavedDraftsError):
+    """Only indexed Markdown documents have edited copies."""
+
+
 ALLOWED_KINDS = {".md": "markdown", ".csv": "csv", ".xlsx": "xlsx"}
 ALLOWED_STATUSES = {"completed", "blocked", "skipped"}
+TEXT_PREVIEW_LIMIT = 2_000_000
 
 
 def _check_private(path: Path, directory: bool) -> None:
@@ -88,6 +99,7 @@ def _index_items(root: Path) -> list[dict]:
             files.append(metadata)
         if not files:
             raise SavedDraftsError("Saved-draft index entry has no file")
+        modified = max((root / entry["id"]).stat().st_mtime for entry in files)
         source = source.strip()
         source_url = source if urlsplit(source).scheme in {"http", "https"} and urlsplit(source).netloc else None
         if source_url is None and not (source.startswith("Not applicable") or source.startswith("Associated task:")):
@@ -99,6 +111,7 @@ def _index_items(root: Path) -> list[dict]:
             "status": status, "priority": priority.group(1).strip() if priority else None,
             "due": due.group(1).strip() if due else None,
             "blocker": blocker, "files": files,
+            "modifiedAt": datetime.fromtimestamp(modified, timezone.utc).isoformat(),
         })
     if not items:
         raise SavedDraftsError("Saved-draft index has no readable entries")
@@ -152,18 +165,37 @@ def saved_download(file_name: str) -> Path:
     return _find_file(file_name)
 
 
+def _read_markdown(path: Path) -> str:
+    if path.stat().st_size > TEXT_PREVIEW_LIMIT:
+        raise SavedDraftsError("This document is too large for inline preview; download it locally")
+    try:
+        return path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as exc:
+        raise SavedDraftsError("Saved-draft text cannot be read") from exc
+
+
+def saved_markdown(file_name: str) -> dict:
+    """Return an indexed Markdown original and its digest, for edited-copy checks."""
+    path = _find_file(file_name)
+    if path.suffix.lower() != ".md":
+        raise DocumentNotEditable("Only Markdown documents can be edited")
+    text = _read_markdown(path)
+    return {"id": path.name, "name": path.name, "text": text, "sha256": text_digest(text)}
+
+
+def text_digest(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
 def read_saved_content(file_name: str) -> dict:
     path = _find_file(file_name)
     if path.suffix.lower() == ".xlsx":
         return _workbook_content(path)
-    if path.stat().st_size > 2_000_000:
+    if path.stat().st_size > TEXT_PREVIEW_LIMIT:
         raise SavedDraftsError("This document is too large for inline preview; download it locally")
     if path.suffix.lower() not in {".md", ".csv"}:
         raise SavedDraftsError("This document does not yet support inline preview")
-    try:
-        text = path.read_text(encoding="utf-8")
-    except (OSError, UnicodeError) as exc:
-        raise SavedDraftsError("Saved-draft text cannot be read") from exc
+    text = _read_markdown(path)
     if path.suffix.lower() == ".csv":
         try:
             records = list(csv.reader(io.StringIO(text, newline="")))
@@ -174,7 +206,10 @@ def read_saved_content(file_name: str) -> dict:
             "headers": records[0] if records else [], "rows": records[1:201],
             "rowCount": max(0, len(records) - 1), "hasMoreRows": len(records) > 201,
         }
-    return {"id": path.name, "name": path.name, "kind": "markdown", "text": text}
+    return {
+        "id": path.name, "name": path.name, "kind": "markdown", "text": text,
+        "sha256": text_digest(text),
+    }
 
 
 def list_saved_drafts() -> dict:

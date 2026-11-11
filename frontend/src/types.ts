@@ -1,5 +1,5 @@
 export type DraftKind = 'email' | 'notion' | 'slack' | 'whatsapp' | 'spreadsheet' | 'airtable';
-export type View = 'review' | 'saved' | 'compose' | 'sources' | 'connections';
+export type View = 'inbox' | 'compose' | 'sources' | 'connections';
 export type Account = 'personal' | 'cisai';
 
 export interface ChangeEntry {
@@ -102,6 +102,7 @@ export interface SavedEntry {
   due: string | null;
   blocker: string;
   files: SavedFile[];
+  modifiedAt: string;
 }
 
 export interface SavedCatalog {
@@ -115,6 +116,46 @@ export interface SavedCatalog {
 }
 
 export type SavedContent =
-  | { id: string; name: string; kind: 'markdown'; text: string }
+  | { id: string; name: string; kind: 'markdown'; text: string; sha256: string }
   | { id: string; name: string; kind: 'csv'; headers: string[]; rows: string[][]; rowCount: number; hasMoreRows: boolean }
   | { id: string; name: string; kind: 'xlsx'; sheets: { name: string; rows: string[][]; hasMoreRows: boolean; hasMoreColumns: boolean }[]; formulasEvaluated: boolean; rowLimit: number; columnLimit: number; sheetPreviewLimit: number };
+
+export interface DocumentVersionSummary {
+  version: number;
+  sha256: string;
+  originalSha256: string;
+  bytes: number;
+  actor: string;
+  createdAt: string;
+}
+
+export interface DocumentVersions {
+  fileId: string;
+  originalSha256: string;
+  versions: DocumentVersionSummary[];
+  latest: (DocumentVersionSummary & { text: string }) | null;
+  originalChanged: boolean;
+  originalWritten: boolean;
+}
+
+/** Inbox grouping, in the user's words: messages, documents, and updates. */
+export type InboxGroup = 'message' | 'document' | 'update';
+
+export type InboxItem =
+  | (InboxItemBase & { source: 'draft'; draft: Draft })
+  | (InboxItemBase & { source: 'document'; entry: SavedEntry });
+
+interface InboxItemBase {
+  key: string;
+  group: InboxGroup;
+  /** Short destination or type label, e.g. "Email · personal". */
+  label: string;
+  title: string;
+  preview: string;
+  /** ISO timestamp the draft was produced (drafts) or last written (documents). */
+  time: string;
+  /** Still awaiting the user's attention. */
+  open: boolean;
+  /** Draft status or document status, for the badge. */
+  status: string;
+}

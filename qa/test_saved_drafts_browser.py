@@ -1,116 +1,200 @@
+import hashlib
 import json
-from pathlib import Path
-import subprocess
-import sys
+import urllib.request
 
-from qa.browser_authentication import qa_url, sign_in
-from qa.test_browser_journeys import OUTPUT, SCREENSHOTS
+from openpyxl import load_workbook
+from playwright.sync_api import expect
+
+from qa.browser_authentication import QA_KEY, qa_url, sign_in
+from qa.test_browser_journeys import OUTPUT, SCREENSHOTS, api, assert_no_horizontal_overflow, close_details, open_details, reader
 
 
-def test_saved_drafts_full_review_journey(browser_session):
+SOURCE = OUTPUT / "saved-review-source"
+
+
+def digests() -> dict[str, str]:
+    return {path.name: hashlib.sha256(path.read_bytes()).hexdigest() for path in sorted(SOURCE.iterdir()) if path.is_file()}
+
+
+def open_item(page, title: str):
+    page.locator(".item-row", has_text=title).first.click()
+    expect(reader(page).locator(".paper-title")).to_have_text(title)
+
+
+def test_saved_documents_read_edit_as_versions_and_download(browser_session):
     page, errors = browser_session
-    page.set_default_timeout(10_000)
     origin = qa_url(page)
     external_requests = []
     page.on("request", lambda request: external_requests.append(request.url)
             if not (request.url.startswith(origin) or request.url.startswith("blob:")) else None)
+    before = digests()
     page.goto(origin, wait_until="networkidle")
     sign_in(page)
-    page.get_by_role("button", name="Saved drafts", exact=True).click()
-    page.get_by_role("heading", name="Saved drafts", exact=True).wait_for()
-    assert "5" in page.locator(".saved-summary").inner_text()
-    assert "6" in page.locator(".saved-summary").inner_text()
-    assert page.locator(".saved-row").count() == 5
+
+    # Saved files share the inbox with queued drafts; skipped entries are hidden by default.
+    page.get_by_role("button", name="Documents", exact=False).click()
+    expect(page.locator(".item-row")).to_have_count(4)
+    page.get_by_label("Include reviewed and skipped", exact=True).check()
+    expect(page.locator(".item-row")).to_have_count(5)
+    page.get_by_label("Include reviewed and skipped", exact=True).uncheck()
     assert page.get_by_role("button", name="Send", exact=False).count() == 0
     assert page.get_by_role("button", name="Publish", exact=False).count() == 0
+    assert "must not appear" not in page.content()
 
-    page.get_by_role("button", name="Ready locally", exact=True).click()
-    assert page.locator(".saved-row").count() == 2
-    page.get_by_label("Priority focus", exact=True).select_option("P0")
-    assert page.locator(".saved-row").count() == 1
-    page.get_by_role("button", name="Open Synthetic Alpha", exact=False).click()
-    page.locator(".artifact-markdown").get_by_role("heading", name="Synthetic Alpha", exact=True).wait_for()
-    assert "Check the source before acting" in page.locator(".artifact-markdown").inner_text()
-    assert "escaped | pipe" in page.locator(".saved-blocker").inner_text()
-    assert page.locator(".artifact-markdown script").count() == 0
+    # Alpha holds raw HTML, so it opens as a readable Markdown preview, never as live HTML.
+    open_item(page, "Synthetic Alpha")
+    preview = reader(page).locator(".artifact-markdown")
+    expect(preview.get_by_role("heading", name="Synthetic Alpha", exact=True)).to_be_visible()
+    expect(reader(page)).to_contain_text("Opened as Markdown")
+    assert "Check the source before acting" in preview.inner_text()
+    assert preview.locator("script").count() == 0
     assert page.evaluate("window.__unsafeScriptRan") is None
-    citation = page.locator(".artifact-markdown").get_by_role("link", name="Example citation", exact=True)
+    citation = preview.get_by_role("link", name="Example citation", exact=True)
     assert citation.get_attribute("href") == "https://example.com/review?a=1&b=2"
     assert "noopener" in citation.get_attribute("rel")
-    assert page.locator('.artifact-markdown a[href^="javascript:"]').count() == 0
-    assert "javascript:" in page.locator(".artifact-markdown").inner_text()
-    page.screenshot(path=SCREENSHOTS / "saved-drafts-desktop.png", full_page=True)
+    assert page.locator('a[href^="javascript:"]').count() == 0
+    # Blocker and source details wait in the drawer.
+    assert "escaped | pipe" not in reader(page).inner_text()
+    drawer = open_details(page)
+    expect(drawer).to_contain_text("escaped | pipe")
+    expect(drawer.get_by_role("link", name="Open source task")).to_have_attribute("href", "https://app.notion.com/p/synthetic-alpha")
+    expect(drawer).to_contain_text("No edits saved yet")
+    close_details(page)
+    page.screenshot(path=SCREENSHOTS / "saved-alpha-desktop.png", full_page=True)
 
-    page.get_by_label("Search saved drafts", exact=True).fill("tone")
-    page.get_by_label("Priority focus", exact=True).select_option("all")
-    page.get_by_role("button", name="Open Synthetic tone job", exact=False).click()
-    page.get_by_label("Document within entry", exact=True).select_option("tone-analysis.md")
-    page.locator(".artifact-markdown").get_by_role("heading", name="Synthetic tone analysis", exact=True).wait_for()
-    assert "no real mail" in page.locator(".artifact-markdown").inner_text()
-    assert page.locator(".saved-document-select option").count() == 2
-
-    page.get_by_label("Search saved drafts", exact=True).fill("payments")
-    page.get_by_role("button", name="Needs input", exact=True).click()
-    page.get_by_role("button", name="Open Synthetic payments", exact=False).click()
-    page.get_by_role("tab", name="Evidence", exact=True).wait_for()
-    assert "Comma, retained" in page.locator(".artifact-table").inner_text()
-    assert "=1+1" in page.locator(".artifact-table").inner_text()
-    assert page.get_by_role("tab", name="Next steps", exact=True).count() == 1
-    page.get_by_role("tab", name="Next steps", exact=True).click()
-    assert "Confirm source before any external action" in page.locator(".artifact-table").inner_text()
-
+    reader(page).get_by_role("button", name="Write", exact=True).click()
+    source = reader(page).get_by_role("textbox", name="Edit alpha.md (Markdown)", exact=True)
+    original = source.input_value()
+    source.fill(original + "\nReviewer note: confirmed locally.\n")
+    expect(reader(page).locator(".dirty-dot")).to_be_visible()
+    page.get_by_role("button", name="Save version", exact=True).click()
+    expect(page.get_by_text("Saved as edited version 1. The original file was not changed.", exact=True)).to_be_visible()
+    expect(reader(page).locator(".version-chip")).to_have_text("Edited v1")
+    reader(page).get_by_role("button", name="Original", exact=True).click()
+    expect(reader(page).locator(".artifact-markdown")).not_to_contain_text("Reviewer note")
+    reader(page).get_by_role("button", name="Edited copy · v1", exact=True).click()
+    versions = api(page, "/saved-drafts/alpha.md/versions")
+    assert [item["version"] for item in versions["versions"]] == [1]
+    assert versions["latest"]["text"] == original + "\nReviewer note: confirmed locally.\n"
+    assert versions["originalWritten"] is False
+    drawer = open_details(page)
     with page.expect_download() as event:
-        page.get_by_role("button", name="Download local copy", exact=True).click()
+        drawer.get_by_role("button", name="Download version 1", exact=True).click()
+    target = OUTPUT / "saved-alpha-v1.md"
+    event.value.save_as(target)
+    target.chmod(0o600)
+    assert event.value.suggested_filename == "alpha.edited-v1.md"
+    assert target.read_text(encoding="utf-8") == versions["latest"]["text"]
+    close_details(page)
+
+    # A clean Markdown document is edited as rich text, and the cursor survives saving.
+    page.get_by_label("Search drafts", exact=True).fill("tone")
+    open_item(page, "Synthetic tone job")
+    reader(page).get_by_role("tab", name="tone-analysis.md", exact=True).click()
+    expect(reader(page).get_by_role("heading", name="Synthetic tone analysis", exact=True)).to_be_visible()
+    reader(page).get_by_role("tab", name="tone-prompt.md", exact=True).click()
+    editor = reader(page).get_by_role("textbox", name="Edit tone-prompt.md", exact=True)
+    expect(editor.get_by_role("heading", name="Synthetic tone prompt", exact=True)).to_be_visible()
+    editor.locator("p").last.click()
+    page.keyboard.press("End")
+    page.keyboard.type(" Keep it short.")
+    page.keyboard.press("ControlOrMeta+s")
+    expect(page.get_by_text("Saved as edited version 1. The original file was not changed.", exact=True)).to_be_visible()
+    page.keyboard.type(" More")
+    expect(reader(page).locator(".dirty-dot")).to_be_visible()
+    assert "Keep it short. More" in editor.inner_text()
+    saved = api(page, "/saved-drafts/tone-prompt.md/versions")["latest"]["text"]
+    assert saved == "# Synthetic tone prompt\n\nBe concise, warm and specific. Do not send the example. Keep it short.\n"
+    # Returning to the saved text clears the unsaved marker.
+    for _ in " More":
+        page.keyboard.press("Backspace")
+    expect(editor).to_contain_text("Keep it short.")
+    expect(reader(page).locator(".dirty-dot")).to_have_count(0)
+
+    # A stale save is refused, rather than overwriting a newer version.
+    page.get_by_label("Search drafts", exact=True).fill("payments")
+    open_item(page, "Synthetic payments")
+    expect(reader(page).get_by_role("tab", name="Evidence", exact=True)).to_be_visible()
+    table = reader(page).locator(".artifact-table")
+    assert "Comma, retained" in table.inner_text()
+    assert "=1+1" in table.inner_text()
+    reader(page).get_by_role("tab", name="Next steps", exact=True).click()
+    expect(table).to_contain_text("Confirm source before any external action")
+    with page.expect_download() as event:
+        reader(page).get_by_role("button", name="Download", exact=True).click()
     download = event.value
     assert download.suggested_filename == "payments.xlsx"
     target = OUTPUT / "saved-review-verified.xlsx"
     download.save_as(target)
     target.chmod(0o600)
-    helper = Path.home() / ".hermes/skills/productivity/microsoft-office/scripts/xlsx_read.py"
-    evidence = json.loads(subprocess.check_output([
-        sys.executable, str(helper), str(target), "--json", "--sheet", "Evidence",
-    ], text=True))
-    assert evidence["rows"][1] == ["Alpha", "Comma, retained", 100]
-    assert evidence["rows"][2][1] == "=1+1"
+    rows = [list(row) for row in load_workbook(target)["Evidence"].iter_rows(values_only=True)]
+    assert rows[1] == ["Alpha", "Comma, retained", 100]
+    assert rows[2][1] == "=1+1"
 
-    page.get_by_label("Search saved drafts", exact=True).fill("inventory")
-    page.get_by_role("button", name="Open Synthetic inventory", exact=False).click()
-    table = page.locator(".artifact-table")
+    page.get_by_label("Search drafts", exact=True).fill("inventory")
+    open_item(page, "Synthetic inventory")
+    table = reader(page).locator(".artifact-table")
     assert "Intro, with comma" in table.inner_text()
     assert "First line\nSecond line" in table.inner_text()
 
     page.set_viewport_size({"width": 390, "height": 844})
-    assert page.evaluate("document.documentElement.scrollWidth") <= 390
+    assert_no_horizontal_overflow(page)
     last_row = table.locator("tbody tr").last
     last_row.evaluate("element => element.scrollIntoView({block: 'center', behavior: 'instant'})")
-    row_box = last_row.bounding_box()
-    assert row_box is not None
-    center = {"x": row_box["x"] + row_box["width"] / 2, "y": row_box["y"] + row_box["height"] / 2}
-    element_center = page.evaluate("([x, y]) => document.elementFromPoint(x, y)?.tagName", [center["x"], center["y"]])
-    probe = page.evaluate("""([x, y]) => {
-      const point = document.elementFromPoint(x, y);
-      const rectangle = selector => { const r = document.querySelector(selector).getBoundingClientRect(); return {x: r.x, y: r.y, width: r.width, height: r.height}; };
-      return {point, x, y, hit: point?.outerHTML.slice(0, 300), scrollY: window.scrollY,
-        scrollBehavior: getComputedStyle(document.documentElement).scrollBehavior,
-        documentHeight: document.documentElement.scrollHeight,
-        workspace: rectangle('.workspace'), row: rectangle('.artifact-table tbody tr:last-child'),
-        navigation: rectangle('.navigation-rail')};
-    }""", [center["x"], center["y"]])
-    print("Mobile row-center diagnostic:", probe)
-    assert element_center == "TD", probe
-    assert "Second line" in last_row.inner_text()
-    page.screenshot(path=SCREENSHOTS / "saved-drafts-mobile.png")
-    page.get_by_role("button", name="Back to saved drafts", exact=True).click()
-    assert page.locator(".saved-row").count() == 1
-    page.get_by_label("Search saved drafts", exact=True).fill("")
+    box = last_row.bounding_box()
+    assert box is not None
+    hit = page.evaluate("([x, y]) => document.elementFromPoint(x, y)?.tagName", [box["x"] + box["width"] / 2, box["y"] + box["height"] / 2])
+    assert hit == "TD"
+    page.screenshot(path=SCREENSHOTS / "saved-inventory-mobile.png")
+    page.locator(".mobile-back").click()
+    expect(page.locator(".item-row")).to_have_count(1)
+    page.get_by_label("Search drafts", exact=True).fill("")
     page.get_by_role("button", name="All", exact=True).click()
-    page.get_by_role("button", name="Open Synthetic Alpha", exact=False).click()
-    page.locator(".artifact-markdown").get_by_role("heading", name="Synthetic Alpha", exact=True).wait_for()
-    assert page.evaluate("document.documentElement.scrollWidth") <= 390
-    small_targets = page.evaluate("""() => [...document.querySelectorAll('.saved-view button, .saved-view select, .saved-view .button')]
+    open_item(page, "Synthetic Alpha")
+    assert_no_horizontal_overflow(page)
+    small = page.evaluate("""() => [...document.querySelectorAll('.reader button, .reader select, .reader textarea, .inbox-list button')]
       .filter(el => el.getBoundingClientRect().width > 0 && getComputedStyle(el).visibility !== 'hidden')
       .filter(el => el.getBoundingClientRect().height < 44)
       .map(el => ({text: el.innerText || el.getAttribute('aria-label'), height: el.getBoundingClientRect().height}))""")
-    assert small_targets == []
+    assert small == [], small
+    page.screenshot(path=SCREENSHOTS / "saved-alpha-mobile.png")
+
+    # Nothing under the review folder was written.
+    assert digests() == before
     assert errors == []
     assert external_requests == []
+
+
+def test_saved_document_conflicts_keep_every_version(browser_session):
+    page, errors = browser_session
+    page.goto(qa_url(page), wait_until="networkidle")
+    sign_in(page)
+    page.get_by_label("Search drafts", exact=True).fill("tone")
+    open_item(page, "Synthetic tone job")
+    reader(page).get_by_role("tab", name="tone-analysis.md", exact=True).click()
+    editor = reader(page).get_by_role("textbox", name="Edit tone-analysis.md", exact=True)
+    expect(editor).to_be_visible()
+    # Another window saves a version after this one opened the document.
+    digest = api(page, "/saved-drafts/tone-analysis.md/content")["sha256"]
+    body = json.dumps({"text": "# Other window\n", "base_version": 0, "original_sha256": digest}).encode()
+    request = urllib.request.Request(qa_url(page) + "/api/saved-drafts/tone-analysis.md/versions", data=body, method="POST",
+                                     headers={"X-VO-Key": QA_KEY, "Content-Type": "application/json"})
+    with urllib.request.urlopen(request, timeout=5) as response:
+        assert response.status == 201
+    editor.locator("p").last.click()
+    page.keyboard.press("End")
+    page.keyboard.type(" Mine.")
+    page.get_by_role("button", name="Save version", exact=True).click()
+    conflict = reader(page).locator(".conflict")
+    expect(conflict).to_contain_text("Edited version 1 was saved in another window")
+    assert "Mine." in editor.inner_text()
+    conflict.get_by_role("button", name="Save mine as version 2", exact=True).click()
+    expect(page.get_by_text("Saved as edited version 2. The original file was not changed.", exact=True)).to_be_visible()
+    versions = api(page, "/saved-drafts/tone-analysis.md/versions")
+    assert [item["version"] for item in versions["versions"]] == [1, 2]
+    assert versions["latest"]["text"].endswith("no real mail is present. Mine.\n")
+    drawer = open_details(page)
+    expect(drawer.locator(".version-list li")).to_have_count(2)
+    close_details(page)
+    # The refused first attempt is the only error the page saw.
+    assert [error for error in errors if "409" not in error] == []

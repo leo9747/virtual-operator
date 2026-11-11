@@ -83,3 +83,15 @@ def test_native_google_creation_is_explicitly_locked(client):
     assert response.status_code == 409
     assert "OAuth write scopes" in response.json()["detail"]
     assert client.get("/api/drafts", headers=AUTH).json() == []
+
+
+def test_editing_an_email_keeps_the_account_restricted(client):
+    payload = {
+        "kind": "email", "title": "Account check", "context": "",
+        "payload": {"account": "personal", "to": "a@example.org", "cc": "", "subject": "S", "body": "B"},
+    }
+    created = client.post("/api/drafts", headers=AUTH, json=payload).json()
+    payload["payload"]["account"] = "someone-else"
+    response = client.patch(f"/api/drafts/{created['id']}", headers=AUTH, json=payload)
+    assert response.status_code == 422
+    assert client.get(f"/api/drafts/{created['id']}", headers=AUTH).json()["version"] == 1

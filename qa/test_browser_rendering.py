@@ -1,6 +1,8 @@
 import os
 from pathlib import Path
 
+from playwright.sync_api import expect
+
 from qa.browser_authentication import qa_url, sign_in
 
 
@@ -58,12 +60,16 @@ def collect_errors(page) -> list[str]:
     return errors
 
 
-def test_review_queue_renders_readable_text_without_host_fonts(browser_session):
+def test_inbox_renders_readable_text_without_host_fonts(browser_session):
     page, errors = browser_session
     response = page.goto(qa_url(page), wait_until="networkidle")
     assert response.status == 200
     sign_in(page)
-    assert page.locator("h1").inner_text() == "Review queue"
-    assert "No drafts yet" in page.locator(".queue-list").inner_text()
+    expect(page.locator("h1")).to_have_text("Inbox")
+    # Saved documents from the synthetic review folder are listed; the newest opens.
+    expect(page.locator(".item-row").first).to_be_visible()
+    expect(page.locator(".reader .paper-title")).to_be_visible()
+    # Supporting detail stays hidden until asked for.
+    assert page.locator(".details-drawer").count() == 0
     assert errors == []
-    page.screenshot(path=OUTPUT / "review-desktop.png", full_page=True)
+    page.screenshot(path=OUTPUT / "inbox-desktop.png", full_page=True)

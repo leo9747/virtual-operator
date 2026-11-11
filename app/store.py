@@ -12,6 +12,18 @@ def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def text_sha256(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+class VersionConflict(RuntimeError):
+    """A document version was saved from a stale base version."""
+
+    def __init__(self, latest_version: int):
+        super().__init__("A newer edited version already exists")
+        self.latest_version = latest_version
+
+
 def content_hash(draft: DraftInput) -> str:
     material = {
         "kind": draft.kind,
@@ -64,6 +76,17 @@ class Store:
                     content_hash TEXT NOT NULL,
                     details_json TEXT NOT NULL,
                     created_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS document_versions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    file_id TEXT NOT NULL,
+                    version INTEGER NOT NULL,
+                    text TEXT NOT NULL,
+                    sha256 TEXT NOT NULL,
+                    original_sha256 TEXT NOT NULL,
+                    actor TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    UNIQUE (file_id, version)
                 );
                 """
             )
@@ -206,3 +229,84 @@ class Store:
                 db.execute("SELECT * FROM drafts WHERE id = ?", (draft_id,)).fetchone(),
                 self._audit(db, draft_id),
             )
+
+    # Edited copies of saved documents. The original file under VO_REVIEW_DIR is never
+    # written; every save appends an immutable version row instead.
+
+    VERSION_COLUMNS = (
+        "version, sha256, original_sha256, actor, created_at, "
+        "length(CAST(text AS BLOB)) AS bytes"
+    )
+
+    @staticmethod
+    def _document_version(row: sqlite3.Row, include_text: bool) -> dict:
+        result = {
+            "version": row["version"],
+            "sha256": row["sha256"],
+            "originalSha256": row["original_sha256"],
+            "bytes": row["bytes"],
+            "actor": row["actor"],
+            "createdAt": row["created_at"],
+        }
+        if include_text:
+            result["text"] = row["text"]
+        return result
+
+    def document_versions(self, file_id: str) -> list[dict]:
+        with self.connect() as db:
+            rows = db.execute(
+                f"SELECT {self.VERSION_COLUMNS} FROM document_versions WHERE file_id = ? ORDER BY version",
+                (file_id,),
+            ).fetchall()
+        return [self._document_version(row, include_text=False) for row in rows]
+
+    def document_version(self, file_id: str, version: int | None = None) -> dict | None:
+        with self.connect() as db:
+            if version is None:
+                row = db.execute(
+                    f"SELECT {self.VERSION_COLUMNS}, text FROM document_versions "
+                    "WHERE file_id = ? ORDER BY version DESC LIMIT 1",
+                    (file_id,),
+                ).fetchone()
+            else:
+                row = db.execute(
+                    f"SELECT {self.VERSION_COLUMNS}, text FROM document_versions "
+                    "WHERE file_id = ? AND version = ?",
+                    (file_id, version),
+                ).fetchone()
+        return self._document_version(row, include_text=True) if row else None
+
+    def add_document_version(
+        self, file_id: str, text: str, base_version: int, original_sha256: str,
+    ) -> dict:
+        """Append a version only if `base_version` is still the latest one."""
+        connection = sqlite3.connect(self.path, isolation_level=None)
+        self.path.chmod(0o600)
+        connection.row_factory = sqlite3.Row
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                latest = connection.execute(
+                    "SELECT COALESCE(MAX(version), 0) AS latest FROM document_versions WHERE file_id = ?",
+                    (file_id,),
+                ).fetchone()["latest"]
+                if latest != base_version:
+                    raise VersionConflict(latest)
+                connection.execute(
+                    """INSERT INTO document_versions
+                    (file_id,version,text,sha256,original_sha256,actor,created_at)
+                    VALUES (?,?,?,?,?,?,?)""",
+                    (file_id, latest + 1, text, text_sha256(text), original_sha256, "user", utc_now()),
+                )
+                row = connection.execute(
+                    f"SELECT {self.VERSION_COLUMNS} FROM document_versions "
+                    "WHERE file_id = ? AND version = ?",
+                    (file_id, latest + 1),
+                ).fetchone()
+                connection.execute("COMMIT")
+            except BaseException:
+                connection.execute("ROLLBACK")
+                raise
+        finally:
+            connection.close()
+        return self._document_version(row, include_text=False)
