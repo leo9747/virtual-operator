@@ -1,14 +1,16 @@
 import hmac
 from typing import Literal
+from urllib.parse import quote
 
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.responses import FileResponse, JSONResponse, Response
+from pydantic import BaseModel, Field
 
 from app.config import api_key, data_dir, frontend_dist
 from app import agent
 from app.models import DraftInput
-from app.store import Store
+from app.store import Store, VersionConflict
 from app.integrations import (
     IntegrationError,
     airtable_context,
@@ -17,7 +19,32 @@ from app.integrations import (
     gmail_messages,
 )
 from app.workbooks import create_workbook, validate_workbook_payload
-from app.saved_review import SavedDraftsError, list_saved_drafts, read_saved_content, saved_download
+from app.saved_review import (
+    TEXT_PREVIEW_LIMIT,
+    DocumentNotEditable,
+    SavedDraftsError,
+    list_saved_drafts,
+    read_saved_content,
+    saved_download,
+    saved_markdown,
+)
+
+
+MAX_REQUEST_BYTES = 5_000_000
+
+
+class DocumentVersionInput(BaseModel):
+    text: str = Field(max_length=TEXT_PREVIEW_LIMIT)
+    base_version: int = Field(ge=0)
+    original_sha256: str = Field(pattern="^[0-9a-f]{64}$")
+
+
+def attachment_headers(filename: str) -> dict:
+    """Content-Disposition for a validated, indexed file name (RFC 6266 / 5987)."""
+    fallback = "".join(ch if ch.isascii() and (ch.isalnum() or ch in "._-") else "_" for ch in filename)
+    return {
+        "Content-Disposition": f"attachment; filename=\"{fallback}\"; filename*=utf-8''{quote(filename)}",
+    }
 
 
 def secure_response(response: Response, path: str) -> Response:
@@ -58,6 +85,10 @@ def create_app() -> FastAPI:
             expected = api_key().encode("utf-8")
             if not hmac.compare_digest(supplied, expected):
                 rejection = JSONResponse({"detail": "Valid X-VO-Key required"}, status_code=401)
+                return secure_response(rejection, request.url.path)
+            declared = request.headers.get("content-length", "0")
+            if not declared.isdigit() or int(declared) > MAX_REQUEST_BYTES:
+                rejection = JSONResponse({"detail": "Request body is too large"}, status_code=413)
                 return secure_response(rejection, request.url.path)
         return await call_next(request)
 
@@ -160,6 +191,67 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=503, detail=str(exc)) from exc
         return FileResponse(path, filename=path.name)
 
+    def saved_original(file_name: str) -> dict:
+        try:
+            return saved_markdown(file_name)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="Saved draft not found") from exc
+        except DocumentNotEditable as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except SavedDraftsError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+    @application.get("/api/saved-drafts/{file_name}/versions")
+    def get_saved_draft_versions(file_name: str):
+        original = saved_original(file_name)
+        store = Store(data_dir() / "operator.db")
+        latest = store.document_version(original["id"])
+        return {
+            "fileId": original["id"],
+            "originalSha256": original["sha256"],
+            "versions": store.document_versions(original["id"]),
+            "latest": latest,
+            "originalChanged": bool(latest and latest["originalSha256"] != original["sha256"]),
+            "originalWritten": False,
+        }
+
+    @application.post("/api/saved-drafts/{file_name}/versions", status_code=201)
+    def create_saved_draft_version(file_name: str, version: DocumentVersionInput):
+        if len(version.text.encode("utf-8")) > TEXT_PREVIEW_LIMIT:
+            raise HTTPException(status_code=413, detail="Edited document is too large")
+        if "\x00" in version.text:
+            raise HTTPException(status_code=422, detail="Edited document contains a NUL character")
+        original = saved_original(file_name)
+        if version.original_sha256 != original["sha256"]:
+            raise HTTPException(status_code=409, detail={
+                "code": "original_changed",
+                "message": "The original document changed after you opened it.",
+                "originalSha256": original["sha256"],
+            })
+        try:
+            return Store(data_dir() / "operator.db").add_document_version(
+                original["id"], version.text, version.base_version, original["sha256"],
+            )
+        except VersionConflict as exc:
+            raise HTTPException(status_code=409, detail={
+                "code": "version_conflict",
+                "message": "A newer edited version was saved elsewhere.",
+                "latestVersion": exc.latest_version,
+            }) from exc
+
+    @application.get("/api/saved-drafts/{file_name}/versions/{version}/download")
+    def download_saved_draft_version(file_name: str, version: int):
+        original = saved_original(file_name)
+        result = Store(data_dir() / "operator.db").document_version(original["id"], version)
+        if result is None:
+            raise HTTPException(status_code=404, detail="Edited version not found")
+        stem = original["name"][:-3] if original["name"].lower().endswith(".md") else original["name"]
+        return Response(
+            result["text"].encode("utf-8"),
+            media_type="text/markdown; charset=utf-8",
+            headers=attachment_headers(f"{stem}.edited-v{version}.md"),
+        )
+
     @application.get("/api/drafts")
     def list_drafts():
         return Store(data_dir() / "operator.db").list()
@@ -186,6 +278,8 @@ def create_app() -> FastAPI:
     def update_draft(draft_id: str, draft: DraftInput):
         if draft.native_target:
             raise HTTPException(status_code=409, detail="Native targets remain permission locked")
+        if draft.kind == "email" and draft.payload.get("account") not in {"personal", "cisai"}:
+            raise HTTPException(status_code=422, detail="Email account must be personal or cisai")
         if draft.kind == "spreadsheet":
             try:
                 validate_workbook_payload(draft.payload)

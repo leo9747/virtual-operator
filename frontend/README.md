@@ -19,15 +19,17 @@ The access-key screen validates the local key before mounting any private views.
 
 ## Component and API assumptions
 
-- `ReviewView` accepts a draft list as an array or as `{ drafts: [...] }` / `{ items: [...] }`. A detail response may be the draft directly or `{ draft: {...} }`. Draft fields follow the supplied contract; `contentHash` and `nativeTarget` are accepted as alternatives to snake case.
-- The inspector edits `title`, `context`, `payload`, and `native_target`. Inputs and review decisions become read-only for acknowledged, rejected, completed, sent, published, or approved statuses. Other statuses remain editable; backend validation is still authoritative.
-- Audit events are read from `audit_events`, `audit`, or `events`. Missing versions, hashes, events, and capabilities are shown as unreported rather than replaced with sample data.
+- `InboxView` merges `/api/drafts` and `/api/saved-drafts` into one list sorted newest first (`created_at` / `modifiedAt`). Either source can fail without hiding the other. Draft lists may be an array or `{ drafts: [...] }` / `{ items: [...] }`; `contentHash` and `nativeTarget` are accepted as alternatives to snake case.
+- `DraftReader` shows the draft itself and edits `payload` in place and `title` and `context` in the Details drawer. Untouched payload fields are sent back unchanged. Inputs and decisions become read-only for acknowledged, rejected, completed, sent, published, or approved statuses, and for drafts with a native target; backend validation is still authoritative.
+- `DocumentReader` reads saved files and saves Markdown edits as versions through `/api/saved-drafts/{name}/versions`, sending the base version and original SHA-256 so stale saves are refused.
+- `MarkdownEditor` (TipTap, `@tiptap/*` 3.32.2 and `marked` 17.0.6, pinned exactly) round-trips Markdown. `analyzeMarkdown` in `src/markdown.ts` decides whether a document can be edited as rich text without loss; otherwise it opens in Markdown mode. Edits typed while a save is in flight stay marked as unsaved.
+- `DetailsDrawer` holds context, versions, hashes, audit events, source task and blocker. Audit events are read from `audit_events`, `audit`, or `events`. Missing values are shown as not recorded rather than replaced with sample data.
 - Acknowledge and reject update local review state only. The UI never treats them as sending, publishing, or native delivery.
 - Compose maps all six kinds to the requested payload shapes. CSV parsing supports quoted separators, escaped quotes, CRLF, and multiline cells. Agent submissions use `/api/agent/proposals`; failures preserve every form entry.
 - Gmail and Google Sheets choices record native-target intent only. The interface explicitly states that native integrations are unavailable until the required scopes are added.
-- Spreadsheet artifacts are fetched with the API header as blobs, converted to object URLs, and offered as XLSX downloads. Object URLs are revoked on replacement or unmount.
+- Downloads are fetched with the API header as blobs, converted to object URLs, and revoked after use.
 - Gmail source responses accept an array or `{ messages: [...] }` / `{ items: [...] }`. Airtable and connection/capability responses are rendered recursively as returned, without inventing missing readiness state.
 
 ## Interface
 
-The desktop Operate layout pairs a queue with a Command/Inspect pane. Narrow screens switch between queue and detail, and the primary navigation becomes a bottom bar below 760px. Controls have visible keyboard focus, 44px touch targets on mobile, semantic labels, live status regions, and reduced-motion handling. Fonts and all other assets are local system resources; there are no external CDNs or component libraries.
+Desktop pairs the Inbox list with a reading pane; the Details drawer slides over from the right. Below 920px the list and reader alternate, and below 760px the primary navigation becomes a bottom bar. Controls have visible keyboard focus, 44px touch targets on touch layouts, semantic labels, live status regions, and reduced-motion handling. Fonts and all assets are bundled locally; there are no external CDNs. The editor is built into its own cacheable chunk.

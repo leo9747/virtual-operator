@@ -1,19 +1,19 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { apiFetch } from './api';
 import { AccessGate } from './components/AccessGate';
 import { Navigation } from './components/Navigation';
 import { ComposeView } from './components/ComposeView';
 import { ConnectionsView } from './components/ConnectionsView';
-import { ReviewView } from './components/ReviewView';
-import { SavedDraftsView } from './components/SavedDraftsView';
+import { InboxView } from './components/InboxView';
 import { SourcesView } from './components/SourcesView';
 import type { JsonRecord, View } from './types';
 
-const views: View[] = ['review', 'saved', 'compose', 'sources', 'connections'];
+const views: View[] = ['inbox', 'compose', 'sources', 'connections'];
 
 function initialView(): View {
   const hash = window.location.hash.slice(1) as View;
-  return views.includes(hash) ? hash : 'review';
+  // #review and #saved were the two separate queues before the unified inbox.
+  return views.includes(hash) ? hash : 'inbox';
 }
 
 export default function App() {
@@ -21,7 +21,8 @@ export default function App() {
   const [authenticated, setAuthenticated] = useState(false);
   const [health, setHealth] = useState<'loading' | 'up' | 'down'>('loading');
   const [healthDetail, setHealthDetail] = useState('Same-origin /api');
-  const [reviewRefresh, setReviewRefresh] = useState(0);
+  const [inboxRefresh, setInboxRefresh] = useState(0);
+  const unsaved = useRef(false);
 
   const checkHealth = useCallback(async (signal?: AbortSignal) => {
     setHealth('loading');
@@ -44,15 +45,26 @@ export default function App() {
   }, [checkHealth, authenticated]);
 
   useEffect(() => {
-    const onHashChange = () => setView(initialView());
+    const onHashChange = () => {
+      const next = initialView();
+      if (unsaved.current && !window.confirm('You have unsaved changes. Discard them?')) {
+        window.history.replaceState(null, '', `#${view}`);
+        return;
+      }
+      unsaved.current = false;
+      setView(next);
+    };
     window.addEventListener('hashchange', onHashChange);
     return () => window.removeEventListener('hashchange', onHashChange);
-  }, []);
+  }, [view]);
 
   const navigate = (next: View) => {
+    if (next !== view && unsaved.current && !window.confirm('You have unsaved changes. Discard them?')) return;
+    if (next !== view) unsaved.current = false;
     setView(next);
     window.history.replaceState(null, '', `#${next}`);
   };
+  const onDirtyChange = useCallback((dirty: boolean) => { unsaved.current = dirty; }, []);
 
   if (!authenticated) return <AccessGate onAuthenticated={() => setAuthenticated(true)} />;
 
@@ -67,9 +79,8 @@ export default function App() {
         onRefreshHealth={() => void checkHealth()}
       />
       <main className="workspace" id="main-content">
-        {view === 'review' && <ReviewView key={reviewRefresh} />}
-        {view === 'saved' && <SavedDraftsView />}
-        {view === 'compose' && <ComposeView onCreated={() => { setReviewRefresh((value) => value + 1); navigate('review'); }} />}
+        {view === 'inbox' && <InboxView key={inboxRefresh} onCompose={() => navigate('compose')} onDirtyChange={onDirtyChange} />}
+        {view === 'compose' && <ComposeView onCreated={() => { setInboxRefresh((value) => value + 1); navigate('inbox'); }} />}
         {view === 'sources' && <SourcesView />}
         {view === 'connections' && <ConnectionsView />}
       </main>

@@ -97,6 +97,7 @@ def test_markdown_is_readable_but_unlisted_files_are_not(client, review_dir):
     assert result == {
         "id": "alpha.md", "name": "alpha.md", "kind": "markdown",
         "text": "# Synthetic Alpha\n\nThis is local QA content; nothing external happened.\n",
+        "sha256": "eeae0307af3aee432dc00589557efa6c57f7468c56277820672e51262bf9d2e2",
     }
     assert result["text"].startswith("# Synthetic Alpha")
     assert client.get("/api/saved-drafts/alpha.md/content").status_code == 401

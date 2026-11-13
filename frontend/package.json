@@ -10,6 +10,15 @@
     "test:watch": "vitest"
   },
   "dependencies": {
+    "@tiptap/core": "3.32.2",
+    "@tiptap/extension-list": "3.32.2",
+    "@tiptap/extension-table": "3.32.2",
+    "@tiptap/extensions": "3.32.2",
+    "@tiptap/markdown": "3.32.2",
+    "@tiptap/pm": "3.32.2",
+    "@tiptap/react": "3.32.2",
+    "@tiptap/starter-kit": "3.32.2",
+    "marked": "17.0.6",
     "react": "^19.1.1",
     "react-dom": "^19.1.1"
   },
